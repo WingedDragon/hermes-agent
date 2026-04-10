@@ -4,7 +4,18 @@ import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
 import yaml
+
+
+@pytest.fixture(autouse=True)
+def _isolate_base_config(tmp_path_factory, monkeypatch):
+    """Point HERMES_BASE_CONFIG at a nonexistent file so tests never pick
+    up the developer's real ``~/.hermes/base_config.yaml``. Tests that want
+    to exercise base-layer behavior override the env var themselves."""
+    stub = tmp_path_factory.mktemp("base_cfg_isolation") / "missing_base.yaml"
+    monkeypatch.setenv("HERMES_BASE_CONFIG", str(stub))
+    yield
 
 from hermes_cli.config import (
     DEFAULT_CONFIG,
@@ -79,6 +90,67 @@ class TestLoadConfigDefaults:
             config = load_config()
             assert config["agent"]["max_turns"] == 42
             assert "max_turns" not in config
+
+
+class TestLoadConfigBaseLayer:
+    def test_base_values_apply_when_profile_missing(self, tmp_path):
+        base_path = tmp_path / "base_config.yaml"
+        base_path.write_text("model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n")
+        profile_home = tmp_path / "profile"
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(profile_home), "HERMES_BASE_CONFIG": str(base_path)},
+        ):
+            config = load_config()
+            assert config["model"]["provider"] == "anthropic"
+            assert config["model"]["default"] == "claude-sonnet-4-6"
+
+    def test_profile_overrides_base_with_deep_merge(self, tmp_path):
+        base_path = tmp_path / "base_config.yaml"
+        base_path.write_text(
+            "model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n"
+            "agent:\n  max_turns: 100\n"
+        )
+        profile_home = tmp_path / "profile"
+        profile_home.mkdir()
+        (profile_home / "config.yaml").write_text(
+            "model:\n  default: claude-opus-4-6\n"
+        )
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(profile_home), "HERMES_BASE_CONFIG": str(base_path)},
+        ):
+            config = load_config()
+            assert config["model"]["provider"] == "anthropic"
+            assert config["model"]["default"] == "claude-opus-4-6"
+            assert config["agent"]["max_turns"] == 100
+
+    def test_missing_base_is_noop(self, tmp_path):
+        base_path = tmp_path / "does_not_exist.yaml"
+        profile_home = tmp_path / "profile"
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(profile_home), "HERMES_BASE_CONFIG": str(base_path)},
+        ):
+            config = load_config()
+            assert config["model"] == DEFAULT_CONFIG["model"]
+
+    def test_set_config_value_does_not_touch_base(self, tmp_path):
+        from hermes_cli.config import set_config_value
+
+        base_path = tmp_path / "base_config.yaml"
+        base_path.write_text("model:\n  provider: anthropic\n")
+        base_snapshot = base_path.read_text()
+        profile_home = tmp_path / "profile"
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(profile_home), "HERMES_BASE_CONFIG": str(base_path)},
+        ):
+            set_config_value("model.default", "claude-opus-4-6")
+            assert base_path.read_text() == base_snapshot
+            profile_yaml = yaml.safe_load((profile_home / "config.yaml").read_text())
+            assert profile_yaml["model"]["default"] == "claude-opus-4-6"
+            assert "provider" not in (profile_yaml.get("model") or {})
 
 
 class TestSaveAndLoadRoundtrip:

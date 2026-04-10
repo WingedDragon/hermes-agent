@@ -151,6 +151,34 @@ coder config set model.model anthropic/claude-sonnet-4
 echo "You are a focused coding assistant." > ~/.hermes/profiles/coder/SOUL.md
 ```
 
+### Shared base config
+
+Define settings shared across every profile in `~/.hermes/base_config.yaml`. Each profile's `config.yaml` is then deep-merged **on top** of the base, so profiles only need to declare the keys they override.
+
+```yaml
+# ~/.hermes/base_config.yaml — shared across all profiles
+model:
+  provider: anthropic
+  default: claude-sonnet-4-6
+custom_providers:
+  - name: anthropic-proxy
+    base_url: https://proxy.example.com/anthropic
+    api_key: ${ANTHROPIC_PROXY_KEY}
+    api_mode: anthropic_messages
+```
+
+```yaml
+# ~/.hermes/profiles/coder/config.yaml — only the diff
+model:
+  default: claude-opus-4-6   # coder uses Opus, inherits provider from base
+```
+
+Merge order is `DEFAULT_CONFIG` → `base_config.yaml` → profile `config.yaml`. Nested dicts merge recursively (e.g., overriding `model.default` keeps `model.provider` from the base); lists and scalars are replaced wholesale.
+
+The base path resolves independently of `HERMES_HOME`, so switching profiles never changes which base is loaded. Override the path with the `HERMES_BASE_CONFIG` env var if you want to keep the base somewhere else.
+
+Writes from `hermes config set` always land in the **profile's** `config.yaml` — the base file is only modified by hand.
+
 ## Updating
 
 `hermes update` pulls code once (shared) and syncs new bundled skills to **all** profiles automatically:

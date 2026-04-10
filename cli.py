@@ -315,76 +315,71 @@ def load_cli_config() -> Dict[str, Any]:
     # file should be authoritative.
     _file_has_terminal_config = False
 
-    # Load from file if exists
-    if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                file_config = yaml.safe_load(f) or {}
-            
-            _file_has_terminal_config = "terminal" in file_config
+    # Delegate the actual YAML loading + layered merging to the canonical
+    # config loader so cli.py never duplicates that logic. ``load_config``
+    # applies: DEFAULT_CONFIG → ~/.hermes/base_config.yaml → profile config.
+    try:
+        from hermes_cli.config import (
+            load_config,
+            read_raw_config,
+            _load_base_config,
+            _deep_merge as _cfg_deep_merge,
+            _expand_env_vars,
+        )
+        merged_config = load_config()
+    except Exception as e:
+        logger.warning("Failed to load merged config: %s", e)
+        merged_config = {}
+        _cfg_deep_merge = None
+        _expand_env_vars = lambda x: x  # noqa: E731
+        def _load_base_config():  # type: ignore[no-redef]
+            return {}
+        def read_raw_config():  # type: ignore[no-redef]
+            return {}
 
-            # Handle model config - can be string (new format) or dict (old format)
-            if "model" in file_config:
-                if isinstance(file_config["model"], str):
-                    # New format: model is just a string, convert to dict structure
-                    defaults["model"]["default"] = file_config["model"]
-                elif isinstance(file_config["model"], dict):
-                    # Old format: model is a dict with default/base_url
-                    defaults["model"].update(file_config["model"])
-                    # If the user config sets model.model but not model.default,
-                    # promote model.model to model.default so the user's explicit
-                    # choice isn't shadowed by the hardcoded default.  Without this,
-                    # profile configs that only set "model:" (not "default:") silently
-                    # fall back to claude-opus because the merge preserves the
-                    # hardcoded default and HermesCLI.__init__ checks "default" first.
-                    if "model" in file_config["model"] and "default" not in file_config["model"]:
-                        defaults["model"]["default"] = file_config["model"]["model"]
+    # Legacy fallback: when no profile config AND no base config exist, some
+    # installs still rely on the project-level cli-config.yaml shipped next
+    # to cli.py. ``load_config`` doesn't know about that path.
+    if not user_config_path.exists() and not _load_base_config():
+        if project_config_path.exists():
+            try:
+                with open(project_config_path, "r") as f:
+                    project_file_config = yaml.safe_load(f) or {}
+                if _cfg_deep_merge is not None:
+                    merged_config = _cfg_deep_merge(merged_config, project_file_config)
+                else:
+                    merged_config = project_file_config
+            except Exception as e:
+                logger.warning("Failed to load cli-config.yaml: %s", e)
 
-            # Legacy root-level provider/base_url fallback.
-            # Some users (or old code) put provider: / base_url: at the
-            # config root instead of inside the model: section.  These are
-            # only used as a FALLBACK when model.provider / model.base_url
-            # is not already set — never as an override.  The canonical
-            # location is model.provider (written by `hermes model`).
-            if not defaults["model"].get("provider"):
-                root_provider = file_config.get("provider")
-                if root_provider:
-                    defaults["model"]["provider"] = root_provider
-            if not defaults["model"].get("base_url"):
-                root_base_url = file_config.get("base_url")
-                if root_base_url:
-                    defaults["model"]["base_url"] = root_base_url
-            
-            # Deep merge file_config into defaults.
-            # First: merge keys that exist in both (deep-merge dicts, overwrite scalars)
-            for key in defaults:
-                if key == "model":
-                    continue  # Already handled above
-                if key in file_config:
-                    if isinstance(defaults[key], dict) and isinstance(file_config[key], dict):
-                        defaults[key].update(file_config[key])
-                    else:
-                        defaults[key] = file_config[key]
-            
-            # Second: carry over keys from file_config that aren't in defaults
-            # (e.g. platform_toolsets, provider_routing, memory, honcho, etc.)
-            for key in file_config:
-                if key not in defaults and key != "model":
-                    defaults[key] = file_config[key]
-            
-            # Handle legacy root-level max_turns (backwards compat) - copy to
-            # agent.max_turns whenever the nested key is missing.
-            agent_file_config = file_config.get("agent")
-            if "max_turns" in file_config and not (
-                isinstance(agent_file_config, dict)
-                and agent_file_config.get("max_turns") is not None
-            ):
-                defaults["agent"]["max_turns"] = file_config["max_turns"]
-        except Exception as e:
-            logger.warning("Failed to load cli-config.yaml: %s", e)
+    # Track whether terminal config was authored by base/profile (not
+    # inherited from DEFAULT_CONFIG). Controls whether values below override
+    # any TERMINAL_* env vars already set from .env.
+    try:
+        _file_has_terminal_config = (
+            "terminal" in (_load_base_config() or {})
+            or "terminal" in (read_raw_config() or {})
+        )
+    except Exception:
+        _file_has_terminal_config = False
 
-    # Expand ${ENV_VAR} references in config values before bridging to env vars.
-    from hermes_cli.config import _expand_env_vars
+    # Layer the merged config over cli.py's hardcoded defaults so cli-only
+    # keys (clarify.timeout, delegation.max_iterations, etc.) survive while
+    # anything the user explicitly authored wins.
+    if merged_config and _cfg_deep_merge is not None:
+        defaults = _cfg_deep_merge(defaults, merged_config)
+
+    # Normalize model shorthand: a bare string shorthand, and ``model.model``
+    # → ``model.default`` for users who wrote ``model: {model: <id>}``.
+    model_cfg = defaults.get("model")
+    if isinstance(model_cfg, str):
+        defaults["model"] = {"default": model_cfg, "base_url": "", "provider": "auto"}
+    elif isinstance(model_cfg, dict):
+        if not model_cfg.get("default") and model_cfg.get("model"):
+            model_cfg["default"] = model_cfg["model"]
+
+    # ``load_config`` already expands ${ENV_VAR} refs, but the cli.py defaults
+    # layered underneath may not have been. Idempotent re-expansion is safe.
     defaults = _expand_env_vars(defaults)
 
     # Apply terminal config to environment variables (so terminal_tool picks them up)

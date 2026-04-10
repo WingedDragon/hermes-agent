@@ -2658,14 +2658,46 @@ def read_raw_config() -> Dict[str, Any]:
     return {}
 
 
+def get_base_config_path() -> Path:
+    """Return the path to the shared base config file.
+
+    Resolved independently of ``HERMES_HOME`` so every profile sees the
+    same base layer. Override with the ``HERMES_BASE_CONFIG`` env var.
+    Defaults to ``~/.hermes/base_config.yaml``.
+    """
+    override = os.getenv("HERMES_BASE_CONFIG", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".hermes" / "base_config.yaml"
+
+
+def _load_base_config() -> Dict[str, Any]:
+    """Load the shared base config, or return ``{}`` if absent."""
+    base_path = get_base_config_path()
+    if not base_path.exists():
+        return {}
+    with open(base_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"base config at {base_path} must be a mapping")
+    return data
+
+
 def load_config() -> Dict[str, Any]:
-    """Load configuration from ~/.hermes/config.yaml."""
+    """Load configuration, layering profile config over a shared base.
+
+    Merge order (later layers override earlier via recursive dict merge):
+        1. ``DEFAULT_CONFIG``
+        2. ``~/.hermes/base_config.yaml`` (override path via ``HERMES_BASE_CONFIG``)
+        3. Profile's ``config.yaml`` at ``get_config_path()``
+    """
     import copy
     ensure_hermes_home()
     config_path = get_config_path()
-    
+
     config = copy.deepcopy(DEFAULT_CONFIG)
-    
+    config = _deep_merge(config, _load_base_config())
+
     if config_path.exists():
         try:
             with open(config_path, encoding="utf-8") as f:

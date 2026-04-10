@@ -6342,15 +6342,19 @@ class AIAgent:
         return transformed
 
     def _anthropic_preserve_dots(self) -> bool:
-        """True when using an anthropic-compatible endpoint that preserves dots in model names.
-        Alibaba/DashScope keeps dots (e.g. qwen3.5-plus).
-        MiniMax keeps dots (e.g. MiniMax-M2.7).
-        OpenCode Go/Zen keeps dots for non-Claude models (e.g. minimax-m2.5-free).
-        ZAI/Zhipu keeps dots (e.g. glm-4.7, glm-5.1)."""
-        if (getattr(self, "provider", "") or "").lower() in {"alibaba", "minimax", "minimax-cn", "opencode-go", "opencode-zen", "zai"}:
-            return True
+        """True when the anthropic-compatible endpoint preserves dots in model names.
+
+        Only native Anthropic (api.anthropic.com) follows the dash convention
+        (``claude-opus-4-6``). Every third-party proxy we've seen — Alibaba,
+        DashScope, OpenCode Go, LiteLLM, MiniMax, etc. — expects the model ID
+        verbatim, including dots. Default to preserving dots and only convert
+        for the real Anthropic host so users' model names aren't silently
+        mangled.
+        """
+        provider = (getattr(self, "provider", "") or "").lower()
         base = (getattr(self, "base_url", "") or "").lower()
-        return "dashscope" in base or "aliyuncs" in base or "minimax" in base or "opencode.ai/zen/" in base or "bigmodel.cn" in base
+        is_native_anthropic = provider == "anthropic" or "api.anthropic.com" in base
+        return not is_native_anthropic
 
     def _is_qwen_portal(self) -> bool:
         """Return True when the base URL targets Qwen Portal."""
