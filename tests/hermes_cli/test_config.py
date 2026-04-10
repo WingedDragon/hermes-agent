@@ -26,12 +26,103 @@ from hermes_cli.config import (
     load_env,
     migrate_config,
     remove_env_value,
+    resolve_config_context_length,
     save_config,
     save_env_value,
     save_env_value_secure,
     sanitize_env_file,
     _sanitize_env_lines,
 )
+
+
+class TestResolveConfigContextLength:
+    """Unit tests for resolve_config_context_length()."""
+
+    _BASE = {
+        "model": {"provider": "litellm", "default": "MiniMax-M2.7"},
+        "custom_providers": [
+            {
+                "name": "litellm",
+                "base_url": "https://litellm.example.com",
+                "models": {"MiniMax-M2.7": {"context_length": 200000}},
+            },
+            {
+                "name": "mininglamp",
+                "base_url": "https://llm.mlamp.example.com",
+                "models": {
+                    "claude-opus-4-6": {"context_length": 200000},
+                    "claude-sonnet-4-6": {"context_length": 200000},
+                },
+            },
+        ],
+    }
+
+    def test_top_level_override_wins(self):
+        cfg = {**self._BASE, "model": {**self._BASE["model"], "context_length": 333}}
+        assert resolve_config_context_length(
+            cfg, "any", provider="litellm", base_url="https://anything"
+        ) == 333
+
+    def test_match_by_provider_name(self):
+        assert resolve_config_context_length(
+            self._BASE, "MiniMax-M2.7", provider="litellm"
+        ) == 200000
+
+    def test_match_by_provider_name_is_case_insensitive(self):
+        assert resolve_config_context_length(
+            self._BASE, "MiniMax-M2.7", provider="LITELLM"
+        ) == 200000
+
+    def test_match_by_base_url_when_provider_missing(self):
+        assert resolve_config_context_length(
+            self._BASE, "claude-opus-4-6",
+            base_url="https://llm.mlamp.example.com/",
+        ) == 200000
+
+    def test_provider_name_takes_precedence_over_base_url(self):
+        # Wrong base_url but correct provider name — should still hit.
+        assert resolve_config_context_length(
+            self._BASE, "MiniMax-M2.7",
+            provider="litellm",
+            base_url="https://unrelated.example.com",
+        ) == 200000
+
+    def test_unknown_model_under_matched_provider_returns_none(self):
+        assert resolve_config_context_length(
+            self._BASE, "nope", provider="litellm"
+        ) is None
+
+    def test_unknown_provider_returns_none(self):
+        assert resolve_config_context_length(
+            self._BASE, "MiniMax-M2.7", provider="ghost",
+        ) is None
+
+    def test_no_keys_at_all_returns_none(self):
+        assert resolve_config_context_length(self._BASE, "MiniMax-M2.7") is None
+
+    def test_non_int_context_length_is_ignored(self):
+        cfg = {
+            "custom_providers": [
+                {
+                    "name": "x",
+                    "base_url": "https://x",
+                    "models": {"m": {"context_length": "not-a-number"}},
+                }
+            ]
+        }
+        assert resolve_config_context_length(cfg, "m", provider="x") is None
+
+    def test_missing_custom_providers_returns_none(self):
+        assert resolve_config_context_length(
+            {"model": {"provider": "litellm"}}, "m", provider="litellm"
+        ) is None
+
+    def test_base_url_trailing_slash_normalized(self):
+        # Entry has no trailing slash; query has one.
+        assert resolve_config_context_length(
+            self._BASE, "MiniMax-M2.7",
+            base_url="https://litellm.example.com/",
+        ) == 200000
 
 
 class TestGetHermesHome:

@@ -3664,72 +3664,39 @@ class GatewayRunner:
             try:
                 _hyg_data = _load_gateway_config()
                 if _hyg_data:
-                    # Resolve model name (same logic as run_sync)
                     _model_cfg = _hyg_data.get("model", {})
                     if isinstance(_model_cfg, str):
                         _hyg_model = _model_cfg
                     elif isinstance(_model_cfg, dict):
                         _hyg_model = _model_cfg.get("default") or _model_cfg.get("model") or _hyg_model
-                        # Read explicit context_length override from model config
-                        # (same as run_agent.py lines 995-1005)
-                        _raw_ctx = _model_cfg.get("context_length")
-                        if _raw_ctx is not None:
-                            try:
-                                _hyg_config_context_length = int(_raw_ctx)
-                            except (TypeError, ValueError):
-                                pass
-                        # Read provider for accurate context detection
                         _hyg_provider = _model_cfg.get("provider") or None
                         _hyg_base_url = _model_cfg.get("base_url") or None
 
-                    # Read compression settings — only use enabled flag.
-                    # The threshold is intentionally separate from the agent's
-                    # compression.threshold (hygiene runs higher).
                     _comp_cfg = _hyg_data.get("compression", {})
                     if isinstance(_comp_cfg, dict):
                         _hyg_compression_enabled = str(
                             _comp_cfg.get("enabled", True)
                         ).lower() in ("true", "1", "yes")
 
-                try:
-                    _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
-                        source=source,
-                        session_key=session_key,
-                        user_config=_hyg_data if isinstance(_hyg_data, dict) else None,
-                    )
-                    _hyg_provider = _hyg_runtime.get("provider") or _hyg_provider
-                    _hyg_base_url = _hyg_runtime.get("base_url") or _hyg_base_url
-                    _hyg_api_key = _hyg_runtime.get("api_key") or _hyg_api_key
-                except Exception:
-                    pass
-
-                # Check custom_providers per-model context_length
-                # (same fallback as run_agent.py lines 1171-1189).
-                # Must run after runtime resolution so _hyg_base_url is set.
-                if _hyg_config_context_length is None and _hyg_base_url:
+                # Resolve provider/base_url from runtime if not in config —
+                # must happen before the context_length lookup since it keys
+                # on base_url.
+                if not _hyg_provider or not _hyg_base_url:
                     try:
-                        try:
-                            from hermes_cli.config import get_compatible_custom_providers as _gw_gcp
-                            _hyg_custom_providers = _gw_gcp(_hyg_data)
-                        except Exception:
-                            _hyg_custom_providers = _hyg_data.get("custom_providers")
-                            if not isinstance(_hyg_custom_providers, list):
-                                _hyg_custom_providers = []
-                        for _cp in _hyg_custom_providers:
-                            if not isinstance(_cp, dict):
-                                continue
-                            _cp_url = (_cp.get("base_url") or "").rstrip("/")
-                            if _cp_url and _cp_url == _hyg_base_url.rstrip("/"):
-                                _cp_models = _cp.get("models", {})
-                                if isinstance(_cp_models, dict):
-                                    _cp_model_cfg = _cp_models.get(_hyg_model, {})
-                                    if isinstance(_cp_model_cfg, dict):
-                                        _cp_ctx = _cp_model_cfg.get("context_length")
-                                        if _cp_ctx is not None:
-                                            _hyg_config_context_length = int(_cp_ctx)
-                                break
-                    except (TypeError, ValueError):
+                        _hyg_runtime = _resolve_runtime_agent_kwargs()
+                        _hyg_provider = _hyg_provider or _hyg_runtime.get("provider")
+                        _hyg_base_url = _hyg_base_url or _hyg_runtime.get("base_url")
+                        _hyg_api_key = _hyg_runtime.get("api_key")
+                    except Exception:
                         pass
+
+                from hermes_cli.config import resolve_config_context_length
+                _hyg_config_context_length = resolve_config_context_length(
+                    _hyg_data,
+                    _hyg_model,
+                    provider=_hyg_provider or "",
+                    base_url=_hyg_base_url or "",
+                )
             except Exception:
                 pass
 
@@ -4289,16 +4256,11 @@ class GatewayRunner:
         base_url = None
         api_key = None
 
+        data = {}
         try:
             data = _load_gateway_config()
             model_cfg = data.get("model", {})
             if isinstance(model_cfg, dict):
-                raw_ctx = model_cfg.get("context_length")
-                if raw_ctx is not None:
-                    try:
-                        config_context_length = int(raw_ctx)
-                    except (TypeError, ValueError):
-                        pass
                 provider = model_cfg.get("provider") or None
                 base_url = model_cfg.get("base_url") or None
         except Exception:
@@ -4310,6 +4272,17 @@ class GatewayRunner:
             provider = provider or runtime.get("provider")
             base_url = base_url or runtime.get("base_url")
             api_key = runtime.get("api_key")
+        except Exception:
+            pass
+
+        try:
+            from hermes_cli.config import resolve_config_context_length
+            config_context_length = resolve_config_context_length(
+                data,
+                model,
+                provider=provider or "",
+                base_url=base_url or "",
+            )
         except Exception:
             pass
 

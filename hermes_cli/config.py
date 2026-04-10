@@ -2717,6 +2717,71 @@ def load_config() -> Dict[str, Any]:
     return _expand_env_vars(_normalize_root_model_keys(_normalize_max_turns_config(config)))
 
 
+def resolve_config_context_length(
+    config: Dict[str, Any],
+    model: str,
+    *,
+    provider: str = "",
+    base_url: str = "",
+) -> Optional[int]:
+    """Resolve the user-declared context length for ``model`` from config.
+
+    Lookup order:
+      1. ``model.context_length`` — top-level override.
+      2. ``custom_providers[].models[<model>].context_length`` — per-model
+         entry under the matching custom provider. Matches by ``name`` when
+         ``provider`` is given (the direct ``model.provider → custom_providers[].name``
+         relationship users actually author), otherwise falls back to
+         matching by ``base_url``.
+
+    Returns ``None`` when nothing is configured so callers can fall through
+    to runtime probing in ``agent.model_metadata``.
+    """
+    model_cfg = config.get("model")
+    if isinstance(model_cfg, dict):
+        raw = model_cfg.get("context_length")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                pass
+
+    providers = config.get("custom_providers")
+    if not isinstance(providers, list):
+        return None
+
+    provider_lower = (provider or "").strip().lower()
+    base_norm = (base_url or "").rstrip("/")
+    if not provider_lower and not base_norm:
+        return None
+
+    for entry in providers:
+        if not isinstance(entry, dict):
+            continue
+        name_lower = str(entry.get("name") or "").strip().lower()
+        entry_base = (entry.get("base_url") or "").rstrip("/")
+        matched = (
+            (provider_lower and name_lower == provider_lower)
+            or (not provider_lower and base_norm and entry_base == base_norm)
+        )
+        if not matched:
+            continue
+        models = entry.get("models")
+        if not isinstance(models, dict):
+            return None
+        model_entry = models.get(model)
+        if not isinstance(model_entry, dict):
+            return None
+        raw = model_entry.get("context_length")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 _SECURITY_COMMENT = """
 # ── Security ──────────────────────────────────────────────────────────
 # API keys, tokens, and passwords are redacted from tool output by default.
