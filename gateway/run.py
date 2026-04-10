@@ -3664,6 +3664,7 @@ class GatewayRunner:
             try:
                 _hyg_data = _load_gateway_config()
                 if _hyg_data:
+                    # Resolve model name (same logic as run_sync)
                     _model_cfg = _hyg_data.get("model", {})
                     if isinstance(_model_cfg, str):
                         _hyg_model = _model_cfg
@@ -4261,6 +4262,12 @@ class GatewayRunner:
             data = _load_gateway_config()
             model_cfg = data.get("model", {})
             if isinstance(model_cfg, dict):
+                raw_ctx = model_cfg.get("context_length")
+                if raw_ctx is not None:
+                    try:
+                        config_context_length = int(raw_ctx)
+                    except (TypeError, ValueError):
+                        pass
                 provider = model_cfg.get("provider") or None
                 base_url = model_cfg.get("base_url") or None
         except Exception:
