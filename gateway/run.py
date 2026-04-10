@@ -245,14 +245,39 @@ os.environ["HERMES_QUIET"] = "1"
 os.environ["HERMES_EXEC_ASK"] = "1"
 
 # Set terminal working directory for messaging platforms.
-# config.yaml terminal.cwd is the canonical source (bridged to TERMINAL_CWD
-# by the config bridge above).  When it's unset or a placeholder, default
-# to home directory.  MESSAGING_CWD is accepted as a backward-compat
-# fallback (deprecated — the warning above tells users to migrate).
-_configured_cwd = os.environ.get("TERMINAL_CWD", "")
-if not _configured_cwd or _configured_cwd in (".", "auto", "cwd"):
-    _fallback = os.getenv("MESSAGING_CWD") or str(Path.home())
-    os.environ["TERMINAL_CWD"] = _fallback
+# Precedence: MESSAGING_CWD → user-authored terminal.cwd → $HERMES_HOME/workspace
+# → $HOME. Falling back to the profile's workspace keeps each profile
+# self-contained: terminal/tool state lands inside the profile dir instead of
+# polluting the repo dir (which is whatever cwd the gateway was launched from).
+#
+# Subtlety: cli.py's load_cli_config() runs earlier in the import chain and
+# expands DEFAULT_CONFIG's ``terminal.cwd: "."`` sentinel into os.getcwd()
+# (the launch dir) before we get control. So TERMINAL_CWD is almost always
+# non-empty by now. We need to decide whether that value came from the user
+# (authoritative) or from the sentinel expansion (safe to override) — read the
+# raw merged config and check whether ``terminal.cwd`` was actually authored.
+def _gateway_pick_terminal_cwd() -> str | None:
+    explicit = os.getenv("MESSAGING_CWD")
+    if explicit:
+        return explicit
+    try:
+        from hermes_cli.config import load_config
+        _cfg = load_config() or {}
+        _tcfg = _cfg.get("terminal") or {}
+        _raw_cwd = _tcfg.get("cwd") if isinstance(_tcfg, dict) else None
+        if isinstance(_raw_cwd, str) and _raw_cwd and _raw_cwd not in (".", "auto", "cwd"):
+            return _raw_cwd
+    except Exception:
+        pass
+    _workspace = _hermes_home / "workspace"
+    if _workspace.is_dir():
+        return str(_workspace)
+    return str(Path.home())
+
+_gateway_cwd = _gateway_pick_terminal_cwd()
+if _gateway_cwd:
+    os.environ["TERMINAL_CWD"] = _gateway_cwd
+del _gateway_pick_terminal_cwd
 
 from gateway.config import (
     Platform,
@@ -443,15 +468,20 @@ def _platform_config_key(platform: "Platform") -> str:
 
 
 def _load_gateway_config() -> dict:
-    """Load and parse ~/.hermes/config.yaml, returning {} on any error."""
+    """Load the fully-layered Hermes config for gateway code paths.
+
+    Delegates to ``hermes_cli.config.load_config()`` so the shared
+    ``base_config.yaml`` (commit a328ee91) is merged under the active
+    profile's ``config.yaml``. Every gateway caller that used to read
+    ``~/.hermes/config.yaml`` directly would otherwise miss fields that
+    live only in the base layer (e.g. ``model.default``), producing an
+    empty model name at request time.
+    """
     try:
-        config_path = _hermes_home / 'config.yaml'
-        if config_path.exists():
-            import yaml
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f) or {}
+        from hermes_cli.config import load_config
+        return load_config() or {}
     except Exception:
-        logger.debug("Could not load gateway config from %s", _hermes_home / 'config.yaml')
+        logger.debug("Could not load gateway config", exc_info=True)
     return {}
 
 
@@ -3632,12 +3662,8 @@ class GatewayRunner:
             _hyg_api_key = None
             _hyg_data = {}
             try:
-                _hyg_cfg_path = _hermes_home / "config.yaml"
-                if _hyg_cfg_path.exists():
-                    import yaml as _hyg_yaml
-                    with open(_hyg_cfg_path, encoding="utf-8") as _hyg_f:
-                        _hyg_data = _hyg_yaml.safe_load(_hyg_f) or {}
-
+                _hyg_data = _load_gateway_config()
+                if _hyg_data:
                     # Resolve model name (same logic as run_sync)
                     _model_cfg = _hyg_data.get("model", {})
                     if isinstance(_model_cfg, str):
@@ -4264,21 +4290,17 @@ class GatewayRunner:
         api_key = None
 
         try:
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                import yaml as _info_yaml
-                with open(cfg_path, encoding="utf-8") as f:
-                    data = _info_yaml.safe_load(f) or {}
-                model_cfg = data.get("model", {})
-                if isinstance(model_cfg, dict):
-                    raw_ctx = model_cfg.get("context_length")
-                    if raw_ctx is not None:
-                        try:
-                            config_context_length = int(raw_ctx)
-                        except (TypeError, ValueError):
-                            pass
-                    provider = model_cfg.get("provider") or None
-                    base_url = model_cfg.get("base_url") or None
+            data = _load_gateway_config()
+            model_cfg = data.get("model", {})
+            if isinstance(model_cfg, dict):
+                raw_ctx = model_cfg.get("context_length")
+                if raw_ctx is not None:
+                    try:
+                        config_context_length = int(raw_ctx)
+                    except (TypeError, ValueError):
+                        pass
+                provider = model_cfg.get("provider") or None
+                base_url = model_cfg.get("base_url") or None
         except Exception:
             pass
 
