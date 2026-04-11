@@ -319,8 +319,21 @@ class BaseEnvironment(ABC):
         ``_snapshot_ready = True`` so subsequent commands source the snapshot
         instead of running with ``bash -l``.
         """
+        # cd into the caller-supplied cwd before recording pwd. Without this,
+        # the bash subprocess inherits the Python process's cwd (often the
+        # launch dir), and the subsequent _update_cwd() would clobber the
+        # cwd= passed to __init__ with that unrelated path — defeating
+        # TERMINAL_CWD for every downstream command. Expand ~ natively.
+        _init_cwd = self.cwd or ""
+        if _init_cwd and _init_cwd != "~" and not _init_cwd.startswith("~/"):
+            _init_cd = f"cd {shlex.quote(_init_cwd)} 2>/dev/null || true\n"
+        elif _init_cwd:
+            _init_cd = f"cd {_init_cwd} 2>/dev/null || true\n"
+        else:
+            _init_cd = ""
         # Full capture: env vars, functions (filtered), aliases, shell options.
         bootstrap = (
+            f"{_init_cd}"
             f"export -p > {self._snapshot_path}\n"
             f"declare -f | grep -vE '^_[^_]' >> {self._snapshot_path}\n"
             f"alias -p >> {self._snapshot_path}\n"
