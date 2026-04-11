@@ -243,6 +243,229 @@ class TestLoadConfigBaseLayer:
             assert profile_yaml["model"]["default"] == "claude-opus-4-6"
             assert "provider" not in (profile_yaml.get("model") or {})
 
+    def test_save_config_strips_base_values(self, tmp_path):
+        base_path = tmp_path / "base_config.yaml"
+        base_path.write_text(
+            "model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n"
+            "agent:\n  max_turns: 100\n"
+        )
+        profile_home = tmp_path / "profile"
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(profile_home), "HERMES_BASE_CONFIG": str(base_path)},
+        ):
+            cfg = load_config()
+            cfg["model"]["default"] = "claude-opus-4-6"
+            save_config(cfg)
+
+            saved = yaml.safe_load((profile_home / "config.yaml").read_text())
+            assert saved == {"model": {"default": "claude-opus-4-6"}}
+
+            reloaded = load_config()
+            assert reloaded["model"]["provider"] == "anthropic"
+            assert reloaded["model"]["default"] == "claude-opus-4-6"
+            assert reloaded["agent"]["max_turns"] == 100
+
+    def test_save_config_list_override_persists_whole_list(self, tmp_path):
+        base_path = tmp_path / "base_config.yaml"
+        base_path.write_text(
+            "command_allowlist:\n"
+            "  - kill hermes/gateway process (self-termination)\n"
+        )
+        profile_home = tmp_path / "profile"
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(profile_home), "HERMES_BASE_CONFIG": str(base_path)},
+        ):
+            cfg = load_config()
+            cfg["command_allowlist"] = [
+                "kill hermes/gateway process (self-termination)",
+                "delete in root path",
+            ]
+            save_config(cfg)
+
+            saved = yaml.safe_load((profile_home / "config.yaml").read_text())
+            # Lists are replaced wholesale — the full list has to land in the
+            # profile so _deep_merge can substitute it for base's version.
+            assert saved["command_allowlist"] == [
+                "kill hermes/gateway process (self-termination)",
+                "delete in root path",
+            ]
+
+            reloaded = load_config()
+            assert reloaded["command_allowlist"] == [
+                "kill hermes/gateway process (self-termination)",
+                "delete in root path",
+            ]
+
+    def test_save_config_list_equal_to_base_is_stripped(self, tmp_path):
+        base_path = tmp_path / "base_config.yaml"
+        base_path.write_text(
+            "command_allowlist:\n"
+            "  - kill hermes/gateway process (self-termination)\n"
+            "model:\n  default: claude-opus-4-6\n"
+        )
+        profile_home = tmp_path / "profile"
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(profile_home), "HERMES_BASE_CONFIG": str(base_path)},
+        ):
+            cfg = load_config()
+            # Re-assigning the same list should not leak it into the profile.
+            cfg["command_allowlist"] = list(cfg["command_allowlist"])
+            cfg["model"]["provider"] = "mininglamp"
+            save_config(cfg)
+
+            saved = yaml.safe_load((profile_home / "config.yaml").read_text())
+            assert "command_allowlist" not in saved
+            assert saved == {"model": {"provider": "mininglamp"}}
+
+    def test_save_config_expands_env_vars_in_base_for_diff(self, tmp_path):
+        base_path = tmp_path / "base_config.yaml"
+        base_path.write_text(
+            "custom_providers:\n"
+            "  - name: litellm\n"
+            "    base_url: https://example.test\n"
+            "    api_key: ${HERMES_TEST_LITELLM_KEY}\n"
+        )
+        profile_home = tmp_path / "profile"
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_HOME": str(profile_home),
+                "HERMES_BASE_CONFIG": str(base_path),
+                "HERMES_TEST_LITELLM_KEY": "sk-from-env",
+            },
+        ):
+            cfg = load_config()
+            # Caller sees the expanded value; saving it back must not copy the
+            # resolved secret into the profile — it still matches base.
+            assert cfg["custom_providers"][0]["api_key"] == "sk-from-env"
+            cfg["model"] = {"default": "claude-opus-4-6"}
+            save_config(cfg)
+
+            raw = (profile_home / "config.yaml").read_text()
+            assert "sk-from-env" not in raw
+            saved = yaml.safe_load(raw)
+            assert "custom_providers" not in saved
+            assert saved == {"model": {"default": "claude-opus-4-6"}}
+
+    def test_save_config_empty_diff_removes_stale_profile(self, tmp_path):
+        base_path = tmp_path / "base_config.yaml"
+        base_path.write_text(
+            "model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n"
+        )
+        profile_home = tmp_path / "profile"
+        profile_home.mkdir()
+        # Pre-seed a stale bloated profile to make sure save_config clears it.
+        (profile_home / "config.yaml").write_text(
+            "model:\n  provider: anthropic\n  default: claude-opus-4-6\n"
+        )
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(profile_home), "HERMES_BASE_CONFIG": str(base_path)},
+        ):
+            cfg = load_config()
+            # Revert the override — effective cfg is now identical to base.
+            cfg["model"]["default"] = "claude-sonnet-4-6"
+            save_config(cfg)
+
+            assert not (profile_home / "config.yaml").exists()
+
+            reloaded = load_config()
+            assert reloaded["model"]["provider"] == "anthropic"
+            assert reloaded["model"]["default"] == "claude-sonnet-4-6"
+
+
+class TestSaveConfigLeanDiffRegressions:
+    """Regression tests for the profile-bloat bug.
+
+    Before the ``_deep_diff`` fix, ``save_config`` wrote the fully merged
+    dict (DEFAULT_CONFIG + base_config + profile) to the profile file, so
+    any caller that did ``cfg = load_config(); cfg[k] = v; save_config(cfg)``
+    inflated the profile with hundreds of default keys. These tests pin the
+    lean-diff behavior so the bloat cannot silently return.
+    """
+
+    def test_noop_roundtrip_stays_lean_with_no_profile(self, tmp_path):
+        """save_config(load_config()) with zero mutations must not create a profile."""
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_config(load_config())
+            assert not (tmp_path / "config.yaml").exists()
+
+    def test_noop_roundtrip_stays_lean_with_existing_profile(self, tmp_path):
+        """A profile that only overrides one key stays that lean after a no-op resave."""
+        base_path = tmp_path / "base_config.yaml"
+        base_path.write_text("model:\n  provider: anthropic\n")
+        profile_home = tmp_path / "profile"
+        profile_home.mkdir()
+        (profile_home / "config.yaml").write_text(
+            "model:\n  default: claude-opus-4-6\n"
+        )
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(profile_home), "HERMES_BASE_CONFIG": str(base_path)},
+        ):
+            save_config(load_config())
+            saved = yaml.safe_load((profile_home / "config.yaml").read_text())
+            assert saved == {"model": {"default": "claude-opus-4-6"}}
+
+    def test_strips_default_config_values_without_base_config(self, tmp_path):
+        """Even with no base_config.yaml, DEFAULT_CONFIG values must be stripped."""
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            cfg = load_config()
+            cfg["agent"]["max_turns"] = 42
+            save_config(cfg)
+
+            saved = yaml.safe_load((tmp_path / "config.yaml").read_text())
+            # Only the changed key lands on disk — no sibling agent.* defaults.
+            assert saved == {"agent": {"max_turns": 42}}
+            assert "terminal" not in saved
+            assert "compression" not in saved
+            assert "display" not in saved
+
+    def test_nested_partial_mutation_only_writes_changed_key(self, tmp_path):
+        """Changing one nested field must not drag its siblings onto disk."""
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            cfg = load_config()
+            cfg["terminal"]["timeout"] = 999
+            save_config(cfg)
+
+            saved = yaml.safe_load((tmp_path / "config.yaml").read_text())
+            assert saved == {"terminal": {"timeout": 999}}
+            # Sibling defaults (backend, cwd, docker_image, ...) must NOT appear.
+            assert set(saved["terminal"].keys()) == {"timeout"}
+
+    def test_save_defaults_deletes_stale_profile(self, tmp_path):
+        """Saving exactly DEFAULT_CONFIG should clear an existing bloated profile."""
+        profile_path = tmp_path / "config.yaml"
+        # Pre-seed a bloated file that matches every default.
+        import copy
+        profile_path.write_text(
+            yaml.safe_dump(copy.deepcopy(DEFAULT_CONFIG), sort_keys=False)
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_config(load_config())
+            assert not profile_path.exists()
+
+    def test_save_permanent_allowlist_does_not_bloat_profile(self, tmp_path):
+        """tools/approval.save_permanent_allowlist is the original bloat vector.
+
+        It calls ``save_config(load_config())`` after a single-key mutation.
+        Pin that the profile only records the allowlist, not every default.
+        """
+        from tools.approval import save_permanent_allowlist
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_permanent_allowlist({"rm -rf /tmp/foo", "git push --force"})
+
+            saved = yaml.safe_load((tmp_path / "config.yaml").read_text())
+            assert set(saved.keys()) == {"command_allowlist"}
+            assert sorted(saved["command_allowlist"]) == [
+                "git push --force",
+                "rm -rf /tmp/foo",
+            ]
+
 
 class TestSaveAndLoadRoundtrip:
     def test_roundtrip(self, tmp_path):

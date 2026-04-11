@@ -2573,6 +2573,51 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+_DIFF_MISSING = object()
+
+
+def _deep_diff(new: Any, base: Any) -> Any:
+    """Return the subset of *new* that differs from *base*.
+
+    Dicts recurse key-by-key; keys whose value matches *base* are dropped,
+    and a nested dict that fully collapses becomes ``_DIFF_MISSING`` so its
+    parent can drop it too. Lists and scalars compare as wholes — lists in
+    this config (``custom_providers`` etc.) are replaced, not merged, so a
+    partial overlap still has to be persisted in full.
+    """
+    if isinstance(new, dict) and isinstance(base, dict):
+        out: Dict[str, Any] = {}
+        for key, value in new.items():
+            if key not in base:
+                out[key] = value
+                continue
+            sub = _deep_diff(value, base[key])
+            if sub is _DIFF_MISSING:
+                continue
+            out[key] = sub
+        if not out:
+            return _DIFF_MISSING
+        return out
+    if new == base:
+        return _DIFF_MISSING
+    return new
+
+
+def _compute_base_layer() -> Dict[str, Any]:
+    """Return the effective config *before* the profile layer is applied.
+
+    Mirrors the first two layers of ``load_config`` (``DEFAULT_CONFIG`` +
+    ``base_config.yaml``) including normalization and env expansion, so
+    ``save_config`` can diff against the same shape callers see in memory.
+    """
+    import copy
+    base = copy.deepcopy(DEFAULT_CONFIG)
+    base = _deep_merge(base, _load_base_config())
+    return _expand_env_vars(
+        _normalize_root_model_keys(_normalize_max_turns_config(base))
+    )
+
+
 def _expand_env_vars(obj):
     """Recursively expand ``${VAR}`` references in config values.
 
@@ -2880,7 +2925,14 @@ _COMMENTED_SECTIONS = """
 
 
 def save_config(config: Dict[str, Any]):
-    """Save configuration to ~/.hermes/config.yaml."""
+    """Save configuration to the profile's ``config.yaml``.
+
+    Only keys that differ from ``DEFAULT_CONFIG + base_config.yaml`` are
+    persisted, so profile files stay lean and ``base_config.yaml`` keeps
+    authority over shared settings. Callers can still hand us a fully
+    merged dict (e.g. ``load_config()``'s return value) — the diff happens
+    here.
+    """
     if is_managed():
         managed_error("save configuration")
         return
@@ -2890,8 +2942,23 @@ def save_config(config: Dict[str, Any]):
     config_path = get_config_path()
     normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
 
-    # Build optional commented-out sections for features that are off by
-    # default or only relevant when explicitly configured.
+    base_layer = _compute_base_layer()
+    lean = _deep_diff(normalized, base_layer)
+    if lean is _DIFF_MISSING or not isinstance(lean, dict):
+        lean = {}
+
+    # Diff empty ⇒ profile is fully equivalent to base; skip the write and
+    # remove any stale profile file so load_config falls through to base.
+    if not lean:
+        try:
+            config_path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+
+    # Commented-out feature templates — keyed off the *effective* merged
+    # config, not the diff, so base_config providing security/fallback_model
+    # still suppresses the hints.
     parts = []
     sec = normalized.get("security", {})
     if not sec or sec.get("redact_secrets") is None:
@@ -2902,7 +2969,7 @@ def save_config(config: Dict[str, Any]):
 
     atomic_yaml_write(
         config_path,
-        normalized,
+        lean,
         extra_content="".join(parts) if parts else None,
     )
     _secure_file(config_path)
