@@ -8,6 +8,7 @@ Supports six TTS providers:
 - OpenAI TTS: Good quality, needs OPENAI_API_KEY
 - MiniMax TTS: High-quality with voice cloning, needs MINIMAX_API_KEY
 - Mistral (Voxtral TTS): Multilingual, native Opus, needs MISTRAL_API_KEY
+- Xiaomi MiMo TTS: Chat-completions-style API with style tags, needs MIMO_API_KEY
 - NeuTTS (local, free, no API key): On-device TTS via neutts_cli, needs neutts installed
 
 Output formats:
@@ -99,6 +100,10 @@ DEFAULT_XAI_LANGUAGE = "en"
 DEFAULT_XAI_SAMPLE_RATE = 24000
 DEFAULT_XAI_BIT_RATE = 128000
 DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
+DEFAULT_MIMO_MODEL = "mimo-v2-tts"
+DEFAULT_MIMO_VOICE = "mimo_default"
+DEFAULT_MIMO_BASE_URL = "https://api.xiaomimimo.com/v1/chat/completions"
+_MIMO_STYLE_TAG_RE = re.compile(r"^<style>.*?</style>", re.DOTALL)
 
 def _get_default_output_dir() -> str:
     from hermes_constants import get_hermes_dir
@@ -507,6 +512,93 @@ def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any
 
 
 # ===========================================================================
+# Provider: Xiaomi MiMo TTS
+# ===========================================================================
+def _generate_mimo_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate audio using Xiaomi MiMo TTS (chat-completions-compatible API).
+
+    Docs: https://platform.xiaomimimo.com/#/docs/usage-guide/speech-synthesis
+
+    The MiMo TTS endpoint mirrors OpenAI's chat completions schema: the target
+    text must be delivered as a ``role=assistant`` message, and the generated
+    audio is returned as base64 in ``choices[0].message.audio.data``.
+
+    The ``<style>...</style>`` prefix in *text* is preserved as-is so callers
+    can control speech style per the MiMo docs.
+    """
+    import requests
+
+    mimo_config = tts_config.get("mimo", {})
+    api_key = mimo_config.get("api_key") or os.getenv("MIMO_API_KEY", "")
+    if not api_key:
+        raise ValueError(
+            "MiMo API key not set. Put it in MIMO_API_KEY env var or tts.mimo.api_key "
+            "in ~/.hermes/config.yaml. Get one at https://platform.xiaomimimo.com/"
+        )
+
+    model = mimo_config.get("model", DEFAULT_MIMO_MODEL)
+    voice = mimo_config.get("voice", DEFAULT_MIMO_VOICE)
+    base_url = mimo_config.get("base_url", DEFAULT_MIMO_BASE_URL)
+    style = (mimo_config.get("style") or "").strip()
+
+    # Auto-prepend <style>...</style> from config unless the caller already
+    # supplied an explicit style tag in the text (caller intent wins).
+    content = text
+    if style and not _MIMO_STYLE_TAG_RE.match(text.lstrip()):
+        content = f"<style>{style}</style>{text}"
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "assistant", "content": content},
+        ],
+        "audio": {
+            "format": "wav",
+            "voice": voice,
+        },
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "api-key": api_key,
+    }
+
+    response = requests.post(base_url, json=payload, headers=headers, timeout=120)
+    response.raise_for_status()
+    result = response.json()
+
+    try:
+        audio_b64 = result["choices"][0]["message"]["audio"]["data"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(f"MiMo TTS: unexpected response shape: {result}") from e
+
+    if not audio_b64:
+        raise RuntimeError("MiMo TTS returned empty audio data")
+
+    import base64
+    audio_bytes = base64.b64decode(audio_b64)
+
+    # MiMo returns WAV natively. If caller wanted a different extension,
+    # write WAV first and let ffmpeg convert afterwards (mirrors NeuTTS flow).
+    wav_path = output_path
+    if not output_path.endswith(".wav"):
+        wav_path = output_path.rsplit(".", 1)[0] + ".wav"
+
+    with open(wav_path, "wb") as f:
+        f.write(audio_bytes)
+
+    if wav_path != output_path:
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            conv_cmd = [ffmpeg, "-i", wav_path, "-y", "-loglevel", "error", output_path]
+            subprocess.run(conv_cmd, check=True, timeout=30)
+            os.remove(wav_path)
+        else:
+            os.rename(wav_path, output_path)
+
+    return output_path
+
+
+# ===========================================================================
 # NeuTTS (local, on-device TTS via neutts_cli)
 # ===========================================================================
 
@@ -687,6 +779,10 @@ def text_to_speech_tool(
             logger.info("Generating speech with Mistral Voxtral TTS...")
             _generate_mistral_tts(text, file_str, tts_config)
 
+        elif provider == "mimo":
+            logger.info("Generating speech with Xiaomi MiMo TTS...")
+            _generate_mimo_tts(text, file_str, tts_config)
+
         elif provider == "neutts":
             if not _check_neutts_available():
                 return json.dumps({
@@ -736,7 +832,7 @@ def text_to_speech_tool(
         # Try Opus conversion for Telegram compatibility
         # Edge TTS outputs MP3, NeuTTS outputs WAV — both need ffmpeg conversion
         voice_compatible = False
-        if provider in ("edge", "neutts", "minimax", "xai") and not file_str.endswith(".ogg"):
+        if provider in ("edge", "neutts", "minimax", "xai", "mimo") and not file_str.endswith(".ogg"):
             opus_path = _convert_to_opus(file_str)
             if opus_path:
                 file_str = opus_path
@@ -817,6 +913,8 @@ def check_tts_requirements() -> bool:
             return True
     except ImportError:
         pass
+    if os.getenv("MIMO_API_KEY"):
+        return True
     if _check_neutts_available():
         return True
     return False

@@ -433,6 +433,8 @@ def _print_setup_summary(config: dict, hermes_home):
         tool_status.append(("Text-to-Speech (MiniMax)", True, None))
     elif tts_provider == "mistral" and get_env_value("MISTRAL_API_KEY"):
         tool_status.append(("Text-to-Speech (Mistral Voxtral)", True, None))
+    elif tts_provider == "mimo" and get_env_value("MIMO_API_KEY"):
+        tool_status.append(("Text-to-Speech (Xiaomi MiMo)", True, None))
     elif tts_provider == "neutts":
         try:
             import importlib.util
@@ -923,6 +925,7 @@ def _setup_tts_provider(config: dict):
         "xai": "xAI TTS",
         "minimax": "MiniMax TTS",
         "mistral": "Mistral Voxtral TTS",
+        "mimo": "Xiaomi MiMo TTS",
         "neutts": "NeuTTS",
     }
     current_label = provider_labels.get(current_provider, current_provider)
@@ -945,10 +948,11 @@ def _setup_tts_provider(config: dict):
             "xAI TTS (Grok voices, needs API key)",
             "MiniMax TTS (high quality with voice cloning, needs API key)",
             "Mistral Voxtral TTS (multilingual, native Opus, needs API key)",
+            "Xiaomi MiMo TTS (style tags, chat-completions API, needs API key)",
             "NeuTTS (local on-device, free, ~300MB model download)",
         ]
     )
-    providers.extend(["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "neutts"])
+    providers.extend(["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "mimo", "neutts"])
     choices.append(f"Keep current ({current_label})")
     keep_current_idx = len(choices) - 1
     idx = prompt_choice("Select TTS provider:", choices, keep_current_idx)
@@ -1051,6 +1055,18 @@ def _setup_tts_provider(config: dict):
             if api_key:
                 save_env_value("MISTRAL_API_KEY", api_key)
                 print_success("Mistral TTS API key saved")
+            else:
+                print_warning("No API key provided. Falling back to Edge TTS.")
+                selected = "edge"
+
+    elif selected == "mimo":
+        existing = get_env_value("MIMO_API_KEY")
+        if not existing:
+            print()
+            api_key = prompt("Xiaomi MiMo API key for TTS", password=True)
+            if api_key:
+                save_env_value("MIMO_API_KEY", api_key)
+                print_success("Xiaomi MiMo TTS API key saved")
             else:
                 print_warning("No API key provided. Falling back to Edge TTS.")
                 selected = "edge"
