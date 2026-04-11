@@ -3678,17 +3678,17 @@ class GatewayRunner:
                             _comp_cfg.get("enabled", True)
                         ).lower() in ("true", "1", "yes")
 
-                # Resolve provider/base_url from runtime if not in config —
-                # must happen before the context_length lookup since it keys
-                # on base_url.
-                if not _hyg_provider or not _hyg_base_url:
-                    try:
-                        _hyg_runtime = _resolve_runtime_agent_kwargs()
-                        _hyg_provider = _hyg_provider or _hyg_runtime.get("provider")
-                        _hyg_base_url = _hyg_base_url or _hyg_runtime.get("base_url")
-                        _hyg_api_key = _hyg_runtime.get("api_key")
-                    except Exception:
-                        pass
+                try:
+                    _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
+                        source=source,
+                        session_key=session_key,
+                        user_config=_hyg_data if isinstance(_hyg_data, dict) else None,
+                    )
+                    _hyg_provider = _hyg_runtime.get("provider") or _hyg_provider
+                    _hyg_base_url = _hyg_runtime.get("base_url") or _hyg_base_url
+                    _hyg_api_key = _hyg_runtime.get("api_key") or _hyg_api_key
+                except Exception:
+                    pass
 
                 from hermes_cli.config import resolve_config_context_length
                 _hyg_config_context_length = resolve_config_context_length(
