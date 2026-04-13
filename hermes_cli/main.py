@@ -1109,6 +1109,23 @@ def select_provider_and_model(args=None):
 
     selected_provider = ordered[provider_idx][0]
 
+    # "More providers..." — show the extended list
+    if selected_provider == "more":
+        ext_ordered = list(extended_providers)
+        ext_ordered.append(("custom", "Custom endpoint (enter URL manually)"))
+        _has_saved_custom_list = isinstance(config.get("custom_providers"), list) and bool(config.get("custom_providers"))
+        if _has_saved_custom_list:
+            ext_ordered.append(("remove-custom", "Remove a saved custom provider"))
+        ext_ordered.append(("cancel", "Cancel"))
+
+        ext_idx = _prompt_provider_choice(
+            [label for _, label in ext_ordered], default=0,
+        )
+        if ext_idx is None or ext_ordered[ext_idx][0] == "cancel":
+            print("No change.")
+            return
+        selected_provider = ext_ordered[ext_idx][0]
+
     # Step 2: Provider-specific setup + model selection
     if selected_provider == "openrouter":
         _model_flow_openrouter(config, current_model)
