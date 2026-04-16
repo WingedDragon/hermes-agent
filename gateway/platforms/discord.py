@@ -10,6 +10,7 @@ Uses discord.py library for:
 """
 
 import asyncio
+import json
 import logging
 import os
 import struct
@@ -462,6 +463,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Reply threading mode: "off" (no replies), "first" (reply on first
         # chunk only, default), "all" (reply-reference on every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
+        self._mention_patterns = self._compile_mention_patterns()
 
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
@@ -2414,6 +2416,43 @@ class DiscordAdapter(BasePlatformAdapter):
             return f"{parent_name} / {thread_name}"
         return thread_name
 
+    def _compile_mention_patterns(self):
+        patterns = self.config.extra.get("mention_patterns")
+        if patterns is None:
+            raw = os.getenv("DISCORD_MENTION_PATTERNS", "").strip()
+            if raw:
+                try:
+                    patterns = json.loads(raw)
+                except Exception:
+                    patterns = [part.strip() for part in raw.splitlines() if part.strip()]
+                    if not patterns:
+                        patterns = [part.strip() for part in raw.split(",") if part.strip()]
+        if patterns is None:
+            return []
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        if not isinstance(patterns, list):
+            logger.warning("[%s] discord mention_patterns must be a list or string; got %s", self.name, type(patterns).__name__)
+            return []
+
+        compiled = []
+        for pattern in patterns:
+            if not isinstance(pattern, str) or not pattern.strip():
+                continue
+            try:
+                compiled.append(re.compile(pattern, re.IGNORECASE))
+            except re.error as exc:
+                logger.warning("[%s] Invalid Discord mention pattern %r: %s", self.name, pattern, exc)
+        if compiled:
+            logger.info("[%s] Loaded %d Discord mention pattern(s)", self.name, len(compiled))
+        return compiled
+
+    def _message_matches_mention_patterns(self, message: DiscordMessage) -> bool:
+        if not self._mention_patterns:
+            return False
+        text = message.content or ""
+        return any(pattern.search(text) for pattern in self._mention_patterns)
+
     async def _handle_message(self, message: DiscordMessage) -> None:
         """Handle incoming Discord messages."""
         # In server channels (not DMs), require the bot to be @mentioned
@@ -2426,6 +2465,7 @@ class DiscordAdapter(BasePlatformAdapter):
         #   discord.ignored_channels: Channel IDs where bot NEVER responds (even when mentioned)
         #   discord.allowed_channels: If set, bot ONLY responds in these channels (whitelist)
         #   discord.no_thread_channels: Channel IDs where bot responds directly without creating thread
+        #   discord.mention_patterns: Regex patterns that trigger the bot (like @mention)
         #   discord.auto_thread: Auto-create thread on @mention in channels (default: true)
 
         thread_id = None
@@ -2473,8 +2513,10 @@ class DiscordAdapter(BasePlatformAdapter):
             # the bot has previously participated (auto-created or replied in).
             in_bot_thread = is_thread and thread_id in self._threads
 
+            matched_mention_pattern = self._message_matches_mention_patterns(message)
+
             if require_mention and not is_free_channel and not in_bot_thread:
-                if self._client.user not in message.mentions:
+                if self._client.user not in message.mentions and not matched_mention_pattern:
                     return
 
             if self._client.user and self._client.user in message.mentions:

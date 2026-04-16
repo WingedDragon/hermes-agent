@@ -611,6 +611,9 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(ac, list):
                         ac = ",".join(str(v) for v in ac)
                     os.environ["DISCORD_ALLOWED_CHANNELS"] = str(ac)
+                if "mention_patterns" in discord_cfg and not os.getenv("DISCORD_MENTION_PATTERNS"):
+                    mp = discord_cfg["mention_patterns"]
+                    os.environ["DISCORD_MENTION_PATTERNS"] = json.dumps(mp) if isinstance(mp, list) else str(mp)
                 # no_thread_channels: channels where bot responds directly without creating thread
                 ntc = discord_cfg.get("no_thread_channels")
                 if ntc is not None and not os.getenv("DISCORD_NO_THREAD_CHANNELS"):
